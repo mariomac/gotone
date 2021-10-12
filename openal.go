@@ -4,11 +4,10 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"math"
-	"time"
+	"os"
 
-	al "github.com/timshannon/go-openal/openal"
+	"github.com/go-audio/wav"
 )
 
 const (
@@ -17,67 +16,73 @@ const (
 	maxSampleUpdate  = samplesPerSecond / 15
 )
 
+func panicOn(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
 func main() {
-	// sets up OpenAL with default options
-	device := al.OpenDevice("")
-	defer device.CloseDevice()
-	context := device.CreateContext()
-	defer context.Destroy()
-	context.Activate()
-	vendor := al.GetVendor()
+	file, err := os.OpenFile("output.wav", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0666)
+	panicOn(err)
+	enc := wav.NewEncoder(file, samplesPerSecond, 8, 1, 1 /* PCM */)
+	defer func() {
+		panicOn(enc.Close())
+		panicOn(file.Close())
+	}()
 
-	// make sure things have gone well
-	if err := al.Err(); err != nil {
-		fmt.Printf("Failed to setup OpenAL: %v\n", err)
-		return
+	freqNums := []float64{
+		freqs["e5"],
+		freqs["d5"],
+		freqs["f#4"],
+		freqs["g#4"],
+		freqs["c#5"],
 	}
-	fmt.Printf("OpenAL vendor: %s\n", vendor)
 
-	source := al.NewSource()
-	defer source.Pause()
-	source.SetLooping(false)
-	source.SetPosition(&al.Vector{0.0, 0.0, -5.0})
-	source.SetGain(source.GetMaxGain())
+	freqNum2 := []float64{
+		freqs["e4"],
+		freqs["d4"],
+		freqs["f#3"],
+		freqs["g#3"],
+		freqs["c#4"],
+	}
 
-	buffers := al.NewBuffers(4)
-	if err := al.Err(); err != nil {
-		fmt.Printf("OpenAL buffer creation failed: %v\n", err)
-		return
+	var ch1 []byte
+	var ch2 []byte = make([]byte, samplesPerSecond/4)
+	for _, fr := range freqNums {
+		//enc.AddLE()
+		//ib := audio.IntBuffer{}
+		ch1 = append(ch1, note(defEnv, fr)...)
 	}
-	freqNums := []float64 {
-		freqs["e7"],
-		freqs["d7"],
-		freqs["f#6"],
-		freqs["g#6"],
-		freqs["c#7"],
+	for _, fr := range freqNum2 {
+		_ = fr
+		ch2 = append(ch2, note(defEnv, fr)...)
 	}
+
+
+	for _, f := range mixWaves(ch1, ch2) {
+		panicOn(enc.WriteFrame(f))
+	}
+
 	//r8l16o7ed<f+8g+8>c+<bd8e8&e32ba.c+8&c+32l8.ea2&a&a32r8l16o7ed<f+8g+8>c+<bd8e8&e32ba.c+8&c+32l8.ea2&a&a32r8l16o7ed<f+8g+8>c+<bd8e8&e32ba.c+8&c+32l8.ea2&a&a32r8l16o7ed<f+8g+8>c+<bd8e8&e32ba.c+8&c+32l8.ea2&a&a32
-	/*freqNums := make([]float64, 0, len(freqs))
-	for _, fr := range freqs {
-		freqNums = append(freqNums, fr)
-	}*/
-	//sort.Float64s(freqNums)
-	fn := 0
-	for cbuf := range buffers {
-		buffers[cbuf].SetData(al.FormatMono8, note(defEnv, freqNums[fn]), samplesPerSecond)
-		fn++
-	}
-	source.QueueBuffers(buffers)
+}
 
-	source.Play()
-
-	// load a sound effect
-	// https://developer.tizen.org/dev-guide/2.4/org.tizen.tutorials/html/native/multimedia/openal_tutorial_n.htm
-	for {
-		time.Sleep(10 * time.Millisecond)
-		for source.BuffersProcessed() > 0 {
-			log.Printf("processed %v\n", source.BuffersProcessed())
-			b := source.UnqueueBuffer()
-			b.SetData(al.FormatMono8, note(defEnv, freqNums[fn]), samplesPerSecond)
-			fn = (fn + 1) % len(freqNums)
-			source.QueueBuffer(b)
-		}
+func mixWaves(w1, w2 []byte) []byte {
+	var res []byte
+	var short, long []byte
+	if len(w1) > len(w2) {
+		short, long = w2, w1
+	} else {
+		short, long = w1, w2
 	}
+	for i := range short {
+		res = append(res, byte(
+			(int16(short[i]) + int16(long[i])-256) / 2) + 128)
+	}
+	for _, v := range long[len(short):]{
+		res = append(res, byte(
+			(int16(v)-128)/2+128))
+	}
+	return res
 }
 
 func note(e envelope, freq float64) []byte {
@@ -96,7 +101,7 @@ func squareBytes(freq, timeMs float64, samplesPerSec int) []byte {
 	for i := 0; i < len(s); i++ {
 		l := math.Sin(
 			float64(i) * 2 * math.Pi / float64(samplesPerSec) * freq)
-		s[i] = byte(math.Round(127.5+127.5*l))
+		s[i] = byte(math.Round(127.5 + 127.5*l))
 		/*if l > 0 {
 			s[i] = 255
 		} else {
@@ -106,7 +111,6 @@ func squareBytes(freq, timeMs float64, samplesPerSec int) []byte {
 	prev := byte(255)
 	lastIdx := 0
 	measuredFreq := 0
-	fmt.Println("freq", freq)
 	for i := 0; i < len(s); i++ {
 		if s[i] != prev {
 			//fmt.Printf("%d (l: %d) -> %d\n", i, i-lastIdx, s[i])
@@ -117,8 +121,7 @@ func squareBytes(freq, timeMs float64, samplesPerSec int) []byte {
 			lastIdx = i
 		}
 	}
-	fmt.Println("***** measured freq",
-		float64(measuredFreq)*float64(samplesPerSec)/float64(len(s)))
+	fmt.Println("bytes:", len(s))
 	return s
 }
 
